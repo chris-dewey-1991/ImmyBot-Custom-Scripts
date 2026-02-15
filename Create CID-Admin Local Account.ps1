@@ -5,7 +5,7 @@
     Purpose:        Use with immybot
     Created by:     Chris Dewey
     Updated:        2026.02.15
-    Version:        1.0
+    Version:        2.0
     ===========================================================================
     .DESCRIPTION
     Create the CID-Admin local account for the computer. This uses the $TenantSlug
@@ -16,90 +16,92 @@
 # -----------------------------
 # Hardcoded values (edit these)
 # -----------------------------
-$UserNamePlain = "$TenantSlug-Admin"  # e.g. "acme-Admin" or "TenantSlug-Admin"
-$PasswordPlain = "PASSWORD" # Replace PASSWORD with the temp password you would like to use. IMPORTANT this should be rotated. We use CyberQP to do this for us.
-$FullName      = $UserNamePlain
-$Description   = "Administrator Account"
-$AdminGroup    = "Administrators"
+$UserName     = "$TenantSlug-Admin"
+$Password     = "PASSWORD" # Replace PASSWORD with the temp password you would like to use. IMPORTANT this should be rotated. We use CyberQP to do this for us.
+$FullName     = $UserName
+$Description  = "IT Support Local Admin Account"
+$AdminGroup   = "Administrators"
 
-# Convert password to SecureString
-$SecurePassword = ConvertTo-SecureString $PasswordPlain -AsPlainText -Force
+$SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
 
-function Get-TargetResource {
-    $user = Get-LocalUser -Name $UserNamePlain -ErrorAction SilentlyContinue
+# -----------------------------
+# Helper: Get Current State
+# -----------------------------
+function Get-State {
 
+    $user = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
+
+    $exists = [bool]$user
     $isAdmin = $false
-    if ($user) {
+
+    if ($exists) {
         try {
             $members = Get-LocalGroupMember -Group $AdminGroup -ErrorAction Stop
-            # Depending on how Windows reports it, it may be "User" or "COMPUTER\User"
-            $isAdmin = $members.Name -contains $UserNamePlain -or $members.Name -contains "$env:COMPUTERNAME\$UserNamePlain"
+            $isAdmin = $members.Name -contains $UserName -or
+                       $members.Name -contains "$env:COMPUTERNAME\$UserName"
         } catch {
             $isAdmin = $false
         }
     }
 
-    [pscustomobject]@{
-        UserName = $UserNamePlain
-        Exists   = [bool]$user
-        IsAdmin  = [bool]$isAdmin
+    return [pscustomobject]@{
+        UserName = $UserName
+        Exists   = $exists
+        IsAdmin  = $isAdmin
     }
 }
 
-function Test-TargetResource {
-    $state = Get-TargetResource
-    return ($state.Exists -and $state.IsAdmin)
-}
+# -----------------------------
+# ImmyBot Required Switch
+# -----------------------------
+switch ($Method) {
 
-function Set-TargetResource {
-    $state = Get-TargetResource
+    "Get" {
+        Get-State
+        break
+    }
 
-    if (-not $state.Exists) {
-        try {
+    "Test" {
+        $state = Get-State
+        return ($state.Exists -and $state.IsAdmin)
+    }
+
+    "Set" {
+
+        $state = Get-State
+
+        # Create user if missing
+        if (-not $state.Exists) {
             New-LocalUser `
-                -Name $UserNamePlain `
+                -Name $UserName `
                 -Password $SecurePassword `
                 -FullName $FullName `
                 -Description $Description `
                 -ErrorAction Stop | Out-Null
 
-            Write-Host "Created local user: $UserNamePlain"
-        } catch {
-            throw "Failed to create user '$UserNamePlain': $($_.Exception.Message)"
+            Write-Host "Created local user: $UserName"
         }
-    } else {
-        Write-Host "User '$UserNamePlain' already exists. Skipping creation."
-    }
+        else {
+            Write-Host "User already exists: $UserName"
+        }
 
-    # Re-check before group add (user may have just been created)
-    $state = Get-TargetResource
-
-    if (-not $state.IsAdmin) {
-        try {
-            Add-LocalGroupMember -Group $AdminGroup -Member $UserNamePlain -ErrorAction Stop
-            Write-Host "Added '$UserNamePlain' to '$AdminGroup'."
-        } catch {
-            $msg = $_.Exception.Message
-            if ($msg -match "already a member") {
-                Write-Host "'$UserNamePlain' is already in '$AdminGroup'."
-            } else {
-                throw "Failed to add '$UserNamePlain' to '$AdminGroup': $msg"
+        # Ensure Administrators membership
+        if (-not $state.IsAdmin) {
+            try {
+                Add-LocalGroupMember -Group $AdminGroup -Member $UserName -ErrorAction Stop
+                Write-Host "Added $UserName to $AdminGroup"
+            }
+            catch {
+                if ($_.Exception.Message -notmatch "already a member") {
+                    throw $_
+                }
+                Write-Host "$UserName already in $AdminGroup"
             }
         }
-    } else {
-        Write-Host "'$UserNamePlain' is already a member of '$AdminGroup'."
+        else {
+            Write-Host "$UserName already compliant"
+        }
+
+        break
     }
 }
-
-# -----------------------------
-# ImmyBot compliance execution
-# -----------------------------
-$state = Get-TargetResource
-Write-Host ("Current State: " + ($state | ConvertTo-Json -Compress))
-
-if (-not (Test-TargetResource)) {
-    Set-TargetResource
-}
-
-# Return final compliance result
-Test-TargetResource
